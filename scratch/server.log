@@ -1,0 +1,11 @@
+◇ injected env (9) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+◇ injected env (0) from .env // tip: ⌘ override existing { override: true }
+◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ⌘ override existing { override: true }
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+--- SportMatrix Server Boot Sequence ---
+Database connection verified via Prisma.
+Server successfully started listening on port 5005
+Health check URL: http://localhost:5005/api/v1/health
+----------------------------------------
