@@ -71,10 +71,10 @@ const getStaff = async (req, res) => {
             }
         }
 
-        const rows = await prisma.staffMember.findMany({ 
-            where, 
+        const rows = await prisma.staffMember.findMany({
+            where,
             include: { user: { include: { umpireProfile: true } } },
-            orderBy: { createdAt: 'desc' } 
+            orderBy: { createdAt: 'desc' }
         });
         return res.status(200).json({ success: true, data: rows.map(formatStaff) });
     } catch (error) {

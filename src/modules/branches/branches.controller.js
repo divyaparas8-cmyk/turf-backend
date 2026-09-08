@@ -152,11 +152,22 @@ const formatBranch = (b, statsObj = { revenue: 0, count: 0, commission: 0 }) => 
 const getBookingRevenueByBranch = async (branchIds) => {
     if (!branchIds || !branchIds.length) return {};
     try {
+        const slots = await prisma.slot.findMany({
+            where: { branchId: { in: branchIds } },
+            select: { id: true, branchId: true }
+        });
+        const slotToBranchMap = {};
+        const slotIds = [];
+        for (const s of slots) {
+            slotToBranchMap[s.id] = s.branchId;
+            slotIds.push(s.id);
+        }
+
         const [bookings, matchPayments] = await Promise.all([
-            prisma.booking.findMany({
-                where: { status: { in: ['COMPLETED', 'PENDING'] }, slot: { branchId: { in: branchIds } } },
-                select: { amount: true, slotId: true, slot: { select: { branchId: true } } }
-            }),
+            slotIds.length > 0 ? prisma.booking.findMany({
+                where: { status: { in: ['COMPLETED', 'PENDING'] }, slotId: { in: slotIds } },
+                select: { amount: true, slotId: true }
+            }) : [],
             prisma.matchPayment.findMany({
                 where: { paymentStatus: { in: ['COMPLETED', 'PENDING'] }, match: { branchId: { in: branchIds } } },
                 select: { amount: true, match: { select: { branchId: true, slotId: true } } }
@@ -166,7 +177,7 @@ const getBookingRevenueByBranch = async (branchIds) => {
         const processedSlotIds = new Set();
         const map = {};
         for (const b of bookings) {
-            const bId = b.slot?.branchId;
+            const bId = slotToBranchMap[b.slotId];
             if (!bId) continue;
             if (b.slotId) processedSlotIds.add(b.slotId);
             if (!map[bId]) map[bId] = { revenue: 0, count: 0, commission: 0 };

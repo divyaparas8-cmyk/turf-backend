@@ -151,15 +151,14 @@ class MatchPaymentController {
                         opponentPaymentDeadline: deadline,
                         dareStrategy: paymentMode === 'DARE_TO_PLAY' ? 'SECURED_PREPAYMENT' : null,
                         financialSnapshot: { ...(pricing.financialSnapshot || {}), durationHours, adId: req.body.adId || req.body.activeAdId || null },
-                        commissionRateSnapshot: pricing.commissionRateSnapshot
+                        commissionRateSnapshot: pricing.commissionRateSnapshot,
+                        matchTeams: {
+                            create: [
+                                { id: `TEAM-A-${matchId}`, teamSide: 'TEAM_A', teamName: teamAName, captainName, captainPhone, paidPlayerCount: 0 },
+                                { id: `TEAM-B-${matchId}`, teamSide: 'TEAM_B', teamName: teamBName, paidPlayerCount: 0 }
+                            ]
+                        }
                     }
-                });
-
-                await tx.matchTeam.create({
-                    data: { id: `TEAM-A-${matchId}`, matchId, teamSide: 'TEAM_A', teamName: teamAName, captainName, captainPhone, paidPlayerCount: 0 }
-                });
-                await tx.matchTeam.create({
-                    data: { id: `TEAM-B-${matchId}`, matchId, teamSide: 'TEAM_B', teamName: teamBName, paidPlayerCount: 0 }
                 });
 
                 try {
@@ -230,7 +229,7 @@ class MatchPaymentController {
                 await tx.activityLog.create({
                     data: { id: genId('log'), userId: req.user.id, action: 'MATCH_CREATED', details: `Match ${matchId} created and slot held for 5 minutes.`, entityType: 'Match', entityId: matchId }
                 });
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             return res.json({
                 success: true,
@@ -451,7 +450,7 @@ class MatchPaymentController {
                 });
 
                 return { payment, newMatchStatus, inviteToken };
-            }, { maxWait: 10000, timeout: 20000 });
+            }, { maxWait: 15000, timeout: 30000 });
 
             let payoutDestination = null;
             try {
@@ -558,7 +557,7 @@ class MatchPaymentController {
                 await tx.activityLog.create({
                     data: { id: genId('log'), userId: req.user.id, action: 'OPPONENT_PAID', details: `Opponent share paid for match ${match.id}. Match confirmed; payment pending owner/commission confirmation.`, entityType: 'Match', entityId: match.id }
                 });
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             const provider = await getActiveProvider();
             const payoutDestination = await provider.getPayoutDestination(match.branchId);
@@ -649,7 +648,7 @@ class MatchPaymentController {
                         if (match.paymentMode === 'DARE_TO_PLAY') {
                             await MatchSettlementService.processDareSettlement(tx, match, outcome);
                         }
-                    });
+                    }, { maxWait: 15000, timeout: 30000 });
                 } else {
                     status = 'DISPUTED';
                     outcome = 'DISPUTED';
@@ -668,7 +667,7 @@ class MatchPaymentController {
                                 status: 'OPEN'
                             }
                         });
-                    });
+                    }, { maxWait: 15000, timeout: 30000 });
                 }
             }
 
@@ -829,7 +828,7 @@ class MatchPaymentController {
                 });
 
                 return tx.matchPayment.findUnique({ where: { id } });
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             emitToSuperAdmins('payment:owner-confirmed', { paymentId: id, matchId: payment.matchId });
             if (updated.paymentStatus === 'COMPLETED') {
@@ -898,7 +897,7 @@ class MatchPaymentController {
                 });
 
                 return tx.matchPayment.findUnique({ where: { id } });
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             emitToBranch(branch.id, 'payment:commission-confirmed', { paymentId: id, matchId: payment.matchId });
             if (updated.paymentStatus === 'COMPLETED') {
@@ -1018,7 +1017,7 @@ class MatchPaymentController {
                         reason: reason.trim(), status: 'OPEN'
                     }
                 });
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             return res.json({ success: true, message: 'Dispute raised. Sent to Super Admin for review.' });
         } catch (error) {
@@ -1083,7 +1082,7 @@ class MatchPaymentController {
                 if (match.paymentMode === 'DARE_TO_PLAY') {
                     await MatchSettlementService.processDareSettlement(tx, match, outcome);
                 }
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             return res.json({ success: true, message: `Dispute resolved successfully as ${outcome}.` });
         } catch (error) {

@@ -11,6 +11,8 @@ const formatDateStr = (val) => {
 
 const formatAd = (a) => ({
     id: a.id, _id: a.id,
+    branchId: a.branchId || a.branch?.id || null,
+    branch: a.branch ? { id: a.branch.id, _id: a.branch.id, branchName: a.branch.branchName, city: a.branch.city } : null,
     name: a.name,
     turfName: a.branch?.branchName || null,
     ownerName: a.owner?.fullName || null,

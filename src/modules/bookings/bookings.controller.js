@@ -221,7 +221,7 @@ const cancelBooking = async (req, res) => {
                         resolutionNotes: 'Auto-resolved upon cancellation refund'
                     }
                 }).catch(() => null);
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             emitToBranch(branchId, 'booking:cancelled', { bookingId: booking.id, bookingCode: booking.bookingCode });
             if (booking.userId) emitToUser(booking.userId, 'booking:cancelled', { bookingId: booking.id });
@@ -278,7 +278,7 @@ const cancelBooking = async (req, res) => {
                         resolutionNotes: 'Auto-resolved upon match payment refund'
                     }
                 }).catch(() => null);
-            });
+            }, { maxWait: 15000, timeout: 30000 });
 
             emitToBranch(branchId, 'booking:cancelled', { matchPaymentId: matchPayment.id });
             if (matchPayment.userId) emitToUser(matchPayment.userId, 'booking:cancelled', { matchPaymentId: matchPayment.id });
@@ -641,7 +641,7 @@ const createGuestBooking = async (req, res) => {
                     status: 'COMPLETED'
                 }
             });
-        });
+        }, { maxWait: 15000, timeout: 30000 });
 
         return res.status(201).json({
             success: true,
