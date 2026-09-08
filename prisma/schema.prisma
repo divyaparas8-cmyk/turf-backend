@@ -158,6 +158,8 @@ enum DiscountType {
 enum DiscountStatus {
   DRAFT
   ACTIVE
+  INACTIVE
+  PAUSED
   SCHEDULED
   EXPIRED
   CANCELLED
@@ -960,7 +962,7 @@ model AdPayment {
   branch              Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
 
   // GST Tax Invoice Details
-  billingDate         DateTime      @default(now()) @map("billing_date") @db.Date
+  billingDate         DateTime      @default(now()) @map("billing_date")
   gstRegistration     String        @default("27AAAAA0000A1Z5") @map("gst_registration") @db.VarChar(50)
   campaignName        String?       @map("campaign_name") @db.VarChar(150) // e.g. Top Impression Push
   turfOwnerName       String?       @map("turf_owner_name") @db.VarChar(100)
@@ -997,8 +999,8 @@ model DiscountOffer {
   description           String?        @map("description") @db.Text
   discountType          DiscountType   @default(PERCENTAGE) @map("discount_type") // Percentage (%) or Flat Amount (₹)
   promoCode             String?        @map("promo_code") @db.VarChar(50)        // e.g. MONSOON25, MORNING300
-  banner                String?        @map("banner") @db.VarChar(255)
-  thumbnail             String?        @map("thumbnail") @db.VarChar(255)
+  banner                String?        @map("banner") @db.LongText
+  thumbnail             String?        @map("thumbnail") @db.LongText
 
   // Step 2: Discount Configuration & Slot Rules
   discountValue         Decimal        @map("discount_value") @db.Decimal(10, 2) // 25 (%) or 300 (₹)
@@ -1519,7 +1521,7 @@ model PosOrder {
   orderType        PosOrderType        @default(TURF_BOOKING) @map("order_type")
   sportName        String?             @default("Football") @map("sport_name") @db.VarChar(50)
   courtName        String?             @default("Court A (Main Turf)") @map("court_name") @db.VarChar(100)
-  bookingDate      DateTime            @default(now()) @map("booking_date") @db.Date
+  bookingDate      DateTime            @default(now()) @map("booking_date")
   timeSlot         String?             @default("06:00 PM") @map("time_slot") @db.VarChar(50)
   durationMinutes  Int                 @default(60) @map("duration_minutes")
   playersCount     Int                 @default(10) @map("players_count")

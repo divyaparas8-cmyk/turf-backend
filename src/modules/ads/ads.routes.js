@@ -8,11 +8,18 @@ const {
     getCommissions,
     markCommissionPaid,
     getPayments,
-    getAdAnalytics
+    getAdAnalytics,
+    getPublicAds,
+    recordAdImpression,
+    recordAdClick
 } = require('./ads.controller');
 const { verifyToken, optionalToken, authorizeRoles } = require('../../middleware/auth.middleware');
 
 const router = express.Router();
+
+router.get('/public', getPublicAds);
+router.post('/:id/impression', recordAdImpression);
+router.post('/:id/click', recordAdClick);
 
 router.get('/commissions', optionalToken, getCommissions);
 router.patch('/commissions/:bookingId/pay', verifyToken, markCommissionPaid);

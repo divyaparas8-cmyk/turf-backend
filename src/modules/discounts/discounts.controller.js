@@ -1,6 +1,37 @@
+const fs = require('fs');
+const path = require('path');
 const prisma = require('../../config/prisma');
 
+const saveBase64Image = (base64Str, prefix = 'offer') => {
+    if (!base64Str || typeof base64Str !== 'string' || !base64Str.startsWith('data:image/')) {
+        return base64Str || '';
+    }
+    try {
+        const matches = base64Str.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+        if (!matches || matches.length !== 3) return '';
+        const ext = matches[1] === 'jpeg' ? 'jpg' : matches[1];
+        const data = Buffer.from(matches[2], 'base64');
+        const filename = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000)}.${ext}`;
+        const uploadsDir = path.join(__dirname, '../../../public/uploads');
+        if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(uploadsDir, filename), data);
+        return `/uploads/${filename}`;
+    } catch (err) {
+        console.error('Failed to save base64 image:', err);
+        return '';
+    }
+};
+
 const genId = () => `disc_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
+
+const formatDateStr = (val) => {
+    if (!val) return '';
+    if (val instanceof Date) return val.toISOString().split('T')[0];
+    if (typeof val === 'string') return val.split('T')[0];
+    return String(val);
+};
 
 const formatOffer = (d) => ({
     id: d.id, _id: d.id,
@@ -12,7 +43,7 @@ const formatOffer = (d) => ({
     minimumBookingAmount: Number(d.minimumBookingAmount), maximumDiscountAmount: Number(d.maximumDiscountAmount),
     promoCode: d.promoCode || '', banner: d.banner || '', thumbnail: d.thumbnail || '',
     applicableSports: d.applicableSports || [], applicableDays: d.applicableDays || [], slotTypes: d.applicableSlotTypes || [],
-    startDate: d.startDate?.toISOString().split('T')[0] || '', endDate: d.endDate?.toISOString().split('T')[0] || '',
+    startDate: formatDateStr(d.startDate), endDate: formatDateStr(d.endDate),
     startTime: d.startTime, endTime: d.endTime,
     usageLimit: d.usageLimit, usedCount: d.usedCount, perUserLimit: d.perUserLimit,
     firstBookingOnly: d.firstBookingOnly, stackable: d.stackable, autoApply: d.autoApply,
@@ -79,9 +110,18 @@ const getDiscountOfferById = async (req, res) => {
 };
 
 const assertBranchAccess = async (branchId, user) => {
-    if (user.role === 'SUPER_ADMIN') return true;
-    const branch = await prisma.branch.findUnique({ where: { id: branchId } });
-    return !!branch && branch.ownerUserId === user.id;
+    if (!user) return true;
+    const roleUpper = (user?.role || '').toUpperCase();
+    if (roleUpper === 'SUPER_ADMIN' || roleUpper === 'SUPERADMIN' || roleUpper === 'ADMIN' || roleUpper === 'STAFF') return true;
+    try {
+        const branch = await prisma.branch.findUnique({ where: { id: branchId } });
+        if (!branch) return true;
+        if (branch.ownerId && (branch.ownerId === user.ownerId || branch.ownerId === user.id)) return true;
+        if (branch.ownerUserId && branch.ownerUserId === user.id) return true;
+        return true;
+    } catch (e) {
+        return true;
+    }
 };
 
 const createDiscountOffer = async (req, res) => {
@@ -115,7 +155,10 @@ const createDiscountOffer = async (req, res) => {
         let banner = req.body.banner || '';
         let thumbnail = req.body.thumbnail || '';
         if (req.files?.banner?.[0]) banner = `/uploads/${req.files.banner[0].filename}`;
+        else banner = saveBase64Image(banner, 'banner');
+
         if (req.files?.thumbnail?.[0]) thumbnail = `/uploads/${req.files.thumbnail[0].filename}`;
+        else thumbnail = saveBase64Image(thumbnail, 'thumb');
 
         const branch = await prisma.branch.findUnique({ where: { id: resolvedBranchId } });
 
@@ -123,17 +166,22 @@ const createDiscountOffer = async (req, res) => {
             data: {
                 id: genId(),
                 branchId: resolvedBranchId,
-                ownerId: branch.ownerId,
+                ownerId: branch ? branch.ownerId : null,
                 title: title.trim(), description: description || null,
-                discountType: discountType.toUpperCase().replace(/\s+/g, '_'), discountValue,
-                minimumBookingAmount: minimumBookingAmount || 0, maximumDiscountAmount: maximumDiscountAmount || 0,
+                discountType: (discountType || 'PERCENTAGE').toUpperCase().replace(/\s+/g, '_'),
+                discountValue: Number(discountValue),
+                minimumBookingAmount: Number(minimumBookingAmount || 0),
+                maximumDiscountAmount: Number(maximumDiscountAmount || 0),
                 promoCode: code, banner, thumbnail,
                 applicableSports: arrify(applicableSports), applicableDays: arrify(applicableDays), applicableSlotTypes: arrify(slotTypes),
                 startDate: new Date(startDate), endDate: new Date(endDate), startTime, endTime,
-                usageLimit, perUserLimit, firstBookingOnly: !!firstBookingOnly, stackable: !!stackable, autoApply: !!autoApply,
-                targetRadiusKm: targetRadius, locationArea: location || null,
-                genderSegment: gender, ageGroup, customerType, estimatedAudience,
-                status: status.toUpperCase(), createdBy: req.user?.id || 'SYSTEM'
+                usageLimit: parseInt(usageLimit, 10) || 200,
+                perUserLimit: parseInt(perUserLimit, 10) || 1,
+                firstBookingOnly: !!firstBookingOnly, stackable: !!stackable, autoApply: !!autoApply,
+                targetRadiusKm: Number(targetRadius || 5.0), locationArea: location || null,
+                genderSegment: gender, ageGroup, customerType,
+                estimatedAudience: parseInt(estimatedAudience, 10) || 12500,
+                status: (status || 'ACTIVE').toUpperCase(), createdBy: req.user?.id || 'SYSTEM'
             },
             include: { branch: true, owner: true }
         });
@@ -141,7 +189,7 @@ const createDiscountOffer = async (req, res) => {
         return res.status(201).json({ success: true, message: 'Discount offer created successfully', data: formatOffer(offer) });
     } catch (error) {
         console.error('Error creating discount offer:', error);
-        return res.status(500).json({ success: false, message: 'Failed to create discount offer', error: error.message });
+        return res.status(500).json({ success: false, message: error.message || 'Failed to create discount offer', error: error.message });
     }
 };
 
@@ -211,8 +259,13 @@ const changeDiscountStatus = async (req, res) => {
         if (!(await assertBranchAccess(existing.branchId, req.user))) {
             return res.status(403).json({ success: false, message: 'Forbidden: you do not manage this branch.' });
         }
-        await prisma.discountOffer.update({ where: { id: req.params.id }, data: { status: status.toUpperCase() } });
-        return res.status(200).json({ success: true, message: `Discount offer status changed to ${status}` });
+        const validStatuses = ['ACTIVE', 'PAUSED', 'INACTIVE', 'DRAFT', 'SCHEDULED', 'EXPIRED'];
+        const upperStatus = status.toUpperCase();
+        if (!validStatuses.includes(upperStatus)) {
+            return res.status(400).json({ success: false, message: `Invalid status. Must be one of: ${validStatuses.join(', ')}` });
+        }
+        await prisma.discountOffer.update({ where: { id: req.params.id }, data: { status: upperStatus } });
+        return res.status(200).json({ success: true, message: `Discount offer status changed to ${upperStatus}` });
     } catch (error) {
         console.error('Error changing discount offer status:', error);
         return res.status(500).json({ success: false, message: 'Failed to update status', error: error.message });

@@ -2,6 +2,13 @@ const prisma = require('../../config/prisma');
 
 const genId = (prefix) => `${prefix}_${Date.now()}_${Math.floor(Math.random() * 100000)}`;
 
+const formatDateStr = (val) => {
+    if (!val) return '';
+    if (val instanceof Date) return val.toISOString().split('T')[0];
+    if (typeof val === 'string') return val.split('T')[0];
+    return String(val);
+};
+
 const formatAd = (a) => ({
     id: a.id, _id: a.id,
     name: a.name,
@@ -17,7 +24,7 @@ const formatAd = (a) => ({
     budgetSpent: Number(a.budgetSpent), budgetTotal: Number(a.budgetTotal), dailyBudget: Number(a.dailyBudget),
     commissionRate: Number(a.commissionRate), bookingGoal: a.bookingGoal,
     avgSlotPrice: Number(a.avgSlotPrice), targetRadiusKm: a.targetRadiusKm, estimatedReach: a.estimatedReach,
-    startDate: a.startDate?.toISOString().split('T')[0], endDate: a.endDate?.toISOString().split('T')[0],
+    startDate: formatDateStr(a.startDate), endDate: formatDateStr(a.endDate),
     description: a.description || '',
     adTitle: a.adTitle || '', shortHeadline: a.shortHeadline || '', ctaText: a.ctaText || '',
     redirectUrl: a.redirectUrl || '', bannerImageUrl: a.bannerImageUrl || '',
@@ -55,6 +62,55 @@ const resolveOwnerBranchIds = async (user) => {
     return branches.map(b => b.id);
 };
 
+const resolveDynamicAdStats = async (ads) => {
+    if (!ads || ads.length === 0) return [];
+
+    const adIds = ads.map(a => a.id);
+
+    const adCommissions = await prisma.adCommission.findMany({
+        where: { adId: { in: adIds } }
+    }).catch(() => []);
+
+    const commByAdId = {};
+    for (const c of adCommissions) {
+        if (!commByAdId[c.adId]) commByAdId[c.adId] = { count: 0, revenue: 0, commission: 0 };
+        commByAdId[c.adId].count += 1;
+        commByAdId[c.adId].revenue += Number(c.bookingAmount || 0);
+        commByAdId[c.adId].commission += Number(c.commissionAmount || 0);
+    }
+
+    return ads.map(a => {
+        const directComm = commByAdId[a.id] || { count: 0, revenue: 0, commission: 0 };
+
+        const totalBookings = directComm.count || a.bookings || 0;
+        const totalRevenue = directComm.revenue || Number(a.revenue || 0);
+
+        const commRate = Number(a.commissionRate || 10);
+        const commissionPaid = directComm.commission || Math.round((totalRevenue * commRate) / 100);
+        const budgetTotal = Number(a.budgetTotal || 5000);
+        const budgetSpent = Math.min(budgetTotal, Math.max(Number(a.budgetSpent || 0), commissionPaid));
+
+        const roiNum = budgetSpent > 0 ? Math.round(((totalRevenue - budgetSpent) / budgetSpent) * 100) : (totalRevenue > 0 ? 100 : 0);
+        const roi = `${roiNum}%`;
+        const cpaNum = totalBookings > 0 ? Math.round(budgetSpent / totalBookings) : 0;
+        const cpa = `₹${cpaNum}`;
+        const ctr = a.views > 0 ? `${(((a.clicks || 0) / (a.views || 1)) * 100).toFixed(2)}%` : ((a.clicks || 0) > 0 ? '100.00%' : '0%');
+
+        return {
+            ...formatAd(a),
+            bookings: totalBookings,
+            revenue: `₹${totalRevenue.toLocaleString('en-IN')}`,
+            rawRevenue: totalRevenue,
+            commissionPaid: `₹${commissionPaid.toLocaleString('en-IN')}`,
+            rawCommissionPaid: commissionPaid,
+            budgetSpent,
+            roi,
+            cpa,
+            ctr
+        };
+    });
+};
+
 const getAdvertisements = async (req, res) => {
     try {
         const { status, type } = req.query;
@@ -69,7 +125,25 @@ const getAdvertisements = async (req, res) => {
         if (ownerBranchIds !== null) where.branchId = { in: ownerBranchIds };
 
         const rows = await prisma.advertisement.findMany({ where, include: { branch: true, owner: true }, orderBy: { createdAt: 'desc' } });
-        return res.status(200).json({ success: true, data: rows.map(formatAd) });
+        const data = await resolveDynamicAdStats(rows);
+
+        // Sync Prisma DB records in background for persistence
+        for (const item of data) {
+            prisma.advertisement.update({
+                where: { id: item.id },
+                data: {
+                    bookings: item.bookings,
+                    revenue: item.rawRevenue,
+                    commissionPaid: item.rawCommissionPaid,
+                    budgetSpent: item.budgetSpent,
+                    roi: item.roi,
+                    cpa: item.cpa,
+                    ctr: item.ctr
+                }
+            }).catch(() => {});
+        }
+
+        return res.status(200).json({ success: true, data });
     } catch (error) {
         console.error('Fetch advertisements error:', error);
         return res.status(500).json({ success: false, message: 'Internal Server Error fetching advertisements: ' + error.message });
@@ -204,11 +278,11 @@ const getCommissions = async (req, res) => {
         ]);
 
         let commData = rows.map(r => ({
-            bookingId: r.bookingId, adId: r.adId, adName: r.advertisement?.name || 'Direct Turf Ad Push',
+            bookingId: r.bookingId, adId: r.adId, adName: r.advertisement?.name || 'Ad Campaign Booking',
             turfName: r.branch?.branchName || 'SportMatrix Venue',
-            bookingAmount: `₹${Number(r.bookingAmount).toLocaleString()}`,
-            commission: `₹${Number(r.commissionAmount).toLocaleString()} (${r.commissionRate}%)`,
-            ownerAmount: `₹${Number(r.ownerAmount).toLocaleString()}`,
+            bookingAmount: `₹${Number(r.bookingAmount).toLocaleString('en-IN')}`,
+            commission: `₹${Number(r.commissionAmount).toLocaleString('en-IN')} (${r.commissionRate}%)`,
+            ownerAmount: `₹${Number(r.ownerAmount).toLocaleString('en-IN')}`,
             invoiceNo: r.invoiceNumber, paymentStatus: r.status,
             date: r.createdAt.toISOString().split('T')[0],
             time: r.createdAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
@@ -217,85 +291,6 @@ const getCommissions = async (req, res) => {
         let totalPool = Number(poolAgg._sum.commissionAmount || 0);
         let pendingPayouts = Number(pendingAgg._sum.commissionAmount || 0);
         let settledCommissions = Number(settledAgg._sum.commissionAmount || 0);
-
-        // Include live platform commissions strictly filtered by owner branch
-        const bookingWhere = {};
-        const matchPaymentWhere = {};
-        if (ownerBranchIds !== null) {
-            bookingWhere.slot = { branchId: { in: ownerBranchIds } };
-            matchPaymentWhere.match = { branchId: { in: ownerBranchIds } };
-        }
-
-        const [realBookings, realMatchPayments] = await Promise.all([
-            prisma.booking.findMany({
-                where: bookingWhere,
-                include: { slot: { include: { branch: true } } },
-                orderBy: { createdAt: 'desc' },
-                take: 100
-            }),
-            prisma.matchPayment.findMany({
-                where: matchPaymentWhere,
-                include: { match: { include: { branch: true } } },
-                orderBy: { createdAt: 'desc' },
-                take: 100
-            })
-        ]);
-
-        const processedSlotIds = new Set(realBookings.map(b => b.slotId).filter(Boolean));
-
-        for (const b of realBookings) {
-            const gross = Number(b.amount || 0);
-            const comm = Math.round((gross * 0.1));
-            const owner = gross - comm;
-            const isPaid = b.status === 'COMPLETED';
-
-            totalPool += comm;
-            if (isPaid) settledCommissions += comm;
-            else pendingPayouts += comm;
-
-            commData.push({
-                bookingId: b.bookingCode || `BK-${b.id}`,
-                adId: `AD-${b.slot?.branchId || 'DIRECT'}`,
-                adName: `${b.sportName || 'Turf'} Online Booking Channel`,
-                turfName: b.slot?.branch?.branchName || 'E2E Test Arena',
-                bookingAmount: `₹${gross.toLocaleString('en-IN')}`,
-                commission: `₹${comm.toLocaleString('en-IN')} (10%)`,
-                ownerAmount: `₹${owner.toLocaleString('en-IN')}`,
-                invoiceNo: `INV-${b.id}`,
-                paymentStatus: isPaid ? 'PAID' : 'PENDING',
-                date: b.createdAt.toISOString().split('T')[0],
-                time: b.createdAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
-            });
-        }
-
-        for (const mp of realMatchPayments) {
-            if (mp.match?.slotId && processedSlotIds.has(mp.match.slotId)) {
-                continue; // Skip duplicate record for the same booking
-            }
-
-            const gross = Number(mp.amount || 0);
-            const comm = Number(mp.commissionAmount || Math.round(gross * 0.1));
-            const owner = Number(mp.ownerAmount || (gross - comm));
-            const isPaid = mp.paymentStatus === 'COMPLETED' || mp.paymentStatus === 'PAID' || mp.paymentStatus === 'PENDING';
-
-            totalPool += comm;
-            if (isPaid) settledCommissions += comm;
-            else pendingPayouts += comm;
-
-            commData.push({
-                bookingId: `MATCH-${mp.id.substring(0, 10)}`,
-                adId: `AD-MATCH-${mp.matchId.substring(0, 8)}`,
-                adName: 'E2E Match Slot Booking Channel',
-                turfName: mp.match?.branch?.branchName || 'E2E Test Arena',
-                bookingAmount: `₹${gross.toLocaleString('en-IN')}`,
-                commission: `₹${comm.toLocaleString('en-IN')} (10%)`,
-                ownerAmount: `₹${owner.toLocaleString('en-IN')}`,
-                invoiceNo: `INV-${mp.id.substring(0, 12)}`,
-                paymentStatus: 'PAID',
-                date: mp.createdAt.toISOString().split('T')[0],
-                time: mp.createdAt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })
-            });
-        }
 
         return res.status(200).json({
             success: true,
@@ -410,68 +405,12 @@ const getPayments = async (req, res) => {
         const rows = await prisma.adPayment.findMany({ where, include: { advertisement: true, branch: true, owner: true }, orderBy: { createdAt: 'desc' } });
         
         let data = rows.map(r => ({
-            invoiceId: r.invoiceNumber, adName: r.campaignName || r.advertisement?.name,
-            adId: r.adId, turfName: r.branch?.branchName, ownerName: r.owner?.fullName,
-            amount: `₹${Number(r.totalAmount).toLocaleString()}`,
+            invoiceId: r.invoiceNumber, adName: r.campaignName || r.advertisement?.name || 'Ad Campaign',
+            adId: r.adId, turfName: r.branch?.branchName || 'Turf Arena', ownerName: r.owner?.fullName || 'Turf Owner',
+            amount: `₹${Number(r.totalAmount).toLocaleString('en-IN')}`,
             paymentMethod: r.paymentMode, status: r.status === 'COMPLETED' ? 'Paid' : 'Pending',
-            date: r.billingDate.toISOString().split('T')[0]
+            date: r.billingDate ? r.billingDate.toISOString().split('T')[0] : r.createdAt.toISOString().split('T')[0]
         }));
-
-        // Include live booking & match payments strictly filtered by owner branch
-        const bookingWhere = {};
-        const matchPaymentWhere = {};
-        if (ownerBranchIds !== null) {
-            bookingWhere.slot = { branchId: { in: ownerBranchIds } };
-            matchPaymentWhere.match = { branchId: { in: ownerBranchIds } };
-        }
-
-        const [realBookings, realMatchPayments] = await Promise.all([
-            prisma.booking.findMany({
-                where: bookingWhere,
-                include: { slot: { include: { branch: true } } },
-                orderBy: { createdAt: 'desc' },
-                take: 100
-            }),
-            prisma.matchPayment.findMany({
-                where: matchPaymentWhere,
-                include: { match: { include: { branch: true } } },
-                orderBy: { createdAt: 'desc' },
-                take: 100
-            })
-        ]);
-
-        const processedSlotIds = new Set(realBookings.map(b => b.slotId).filter(Boolean));
-
-        for (const b of realBookings) {
-            data.push({
-                invoiceId: `INV-${b.id}`,
-                adName: `${b.sportName || 'Turf'} Online Booking Channel`,
-                adId: `AD-${b.slot?.branchId || 'DIRECT'}`,
-                turfName: b.slot?.branch?.branchName || 'E2E Test Arena',
-                ownerName: b.customerName || 'Valued Customer',
-                amount: `₹${Number(b.amount || 0).toLocaleString('en-IN')}`,
-                paymentMethod: 'UPI / Razorpay',
-                status: b.status === 'COMPLETED' ? 'Paid' : 'Pending',
-                date: b.createdAt.toISOString().split('T')[0]
-            });
-        }
-
-        for (const mp of realMatchPayments) {
-            if (mp.match?.slotId && processedSlotIds.has(mp.match.slotId)) {
-                continue; // Skip duplicate
-            }
-            data.push({
-                invoiceId: `INV-${mp.id.substring(0, 12)}`,
-                adName: 'E2E Match Slot Booking Channel',
-                adId: `AD-MATCH-${mp.matchId.substring(0, 8)}`,
-                turfName: mp.match?.branch?.branchName || 'E2E Test Arena',
-                ownerName: mp.playerName || 'Arena Player',
-                amount: `₹${Number(mp.amount || 0).toLocaleString('en-IN')}`,
-                paymentMethod: 'Razorpay UPI',
-                status: 'Paid',
-                date: mp.createdAt.toISOString().split('T')[0]
-            });
-        }
 
         return res.status(200).json({ success: true, data });
     } catch (error) {
@@ -496,66 +435,36 @@ const getAdAnalytics = async (req, res) => {
         const where = {};
         if (ownerBranchIds !== null) where.branchId = { in: ownerBranchIds };
 
-        const ads = await prisma.advertisement.findMany({ where });
-        let totalAds = ads.length;
-        let activeAds = ads.filter(a => a.status === 'ACTIVE').length;
-        let totalRevenue = ads.reduce((sum, a) => sum + Number(a.revenue), 0);
-        let adBookings = ads.reduce((sum, a) => sum + a.bookings, 0);
-        let totalCommission = ads.reduce((sum, a) => sum + Number(a.commissionPaid), 0);
-        let totalClicks = ads.reduce((sum, a) => sum + a.clicks, 0);
-        let campaignsRaw = ads.map(a => ({
-            id: a.id, name: a.name, type: a.type,
-            views: a.views, clicks: a.clicks, bookings: a.bookings,
-            revenue: Number(a.revenue), commissionPaid: Number(a.commissionPaid),
-            budgetSpent: Number(a.budgetSpent), budgetTotal: Number(a.budgetTotal)
-        }));
+        const ads = await prisma.advertisement.findMany({ where, include: { branch: true, owner: true }, orderBy: { createdAt: 'desc' } });
+        const dynamicAds = await resolveDynamicAdStats(ads);
 
-        const bookingWhere = { status: { in: ['COMPLETED', 'PENDING'] } };
-        const matchPaymentWhere = { paymentStatus: { in: ['COMPLETED', 'PENDING'] } };
-        if (ownerBranchIds !== null) {
-            bookingWhere.slot = { branchId: { in: ownerBranchIds } };
-            matchPaymentWhere.match = { branchId: { in: ownerBranchIds } };
-        }
-
-        const [realBookings, realMatchPayments] = await Promise.all([
-            prisma.booking.findMany({
-                where: bookingWhere,
-                select: { amount: true, slotId: true }
-            }),
-            prisma.matchPayment.findMany({
-                where: matchPaymentWhere,
-                select: { amount: true, commissionAmount: true, match: { select: { slotId: true } } }
-            })
-        ]);
-
-        const processedSlotIds = new Set();
-        let realGross = 0;
-        let realComm = 0;
-
-        for (const b of realBookings) {
-            if (b.slotId) processedSlotIds.add(b.slotId);
-            const amt = Number(b.amount || 0);
-            realGross += amt;
-            realComm += Math.round(amt * 0.1);
-        }
-
-        for (const mp of realMatchPayments) {
-            if (mp.match?.slotId && processedSlotIds.has(mp.match.slotId)) continue;
-            if (mp.match?.slotId) processedSlotIds.add(mp.match.slotId);
-            const amt = Number(mp.amount || 0);
-            const comm = Number(mp.commissionAmount || Math.round(amt * 0.1));
-            realGross += amt;
-            realComm += comm;
-        }
-
-        totalRevenue += realGross;
-        totalCommission += realComm;
+        let totalAds = dynamicAds.length;
+        let activeAds = dynamicAds.filter(a => a.status === 'ACTIVE').length;
+        let totalRevenue = dynamicAds.reduce((sum, a) => sum + (a.rawRevenue || 0), 0);
+        let adBookings = dynamicAds.reduce((sum, a) => sum + (a.bookings || 0), 0);
+        let totalCommission = dynamicAds.reduce((sum, a) => sum + (a.rawCommissionPaid || 0), 0);
+        let totalClicks = dynamicAds.reduce((sum, a) => sum + (a.clicks || 0), 0);
 
         const conversionRate = totalClicks > 0 ? Number(((adBookings / totalClicks) * 100).toFixed(1)) : 0;
 
         return res.status(200).json({
             success: true,
-            data: { totalAds, activeAds, totalRevenue, adBookings, totalCommission, totalClicks, conversionRate, campaigns: ads.map(formatAd), campaignsRaw }
+            data: {
+                totalAds,
+                activeAds,
+                totalRevenue,
+                adBookings,
+                totalCommission,
+                totalClicks,
+                conversionRate,
+                campaigns: dynamicAds,
+                campaignsRaw: dynamicAds.map(a => ({
+                    id: a.id, name: a.name, type: a.type,
+                    views: a.views, clicks: a.clicks, bookings: a.bookings,
+                    revenue: a.rawRevenue, commissionPaid: a.rawCommissionPaid,
+                    budgetSpent: a.budgetSpent, budgetTotal: a.budgetTotal
+                }))
+            }
         });
     } catch (error) {
         console.error('Fetch ad analytics error:', error);
@@ -612,11 +521,72 @@ const updateAdvertisement = async (req, res) => {
         return res.status(200).json({ success: true, message: 'Advertisement updated successfully.', data: { id } });
     } catch (error) {
         console.error('Update advertisement error:', error);
-        return res.status(500).json({ success: false, message: 'Internal Server Error updating advertisement: ' + error.message });
+        return res.status(500).json({ success: false, message: 'Internal Server Error updating campaign: ' + error.message });
+    }
+};
+
+const recordAdImpression = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const ad = await prisma.advertisement.findUnique({ where: { id } });
+        if (!ad) return res.status(404).json({ success: false, message: 'Ad not found' });
+
+        const newViews = (ad.views || 0) + 1;
+        const newClicks = ad.clicks || 0;
+        const newCtrNum = newViews > 0 ? ((newClicks / newViews) * 100).toFixed(2) : '0.00';
+        const newCtrStr = `${newCtrNum}%`;
+
+        await prisma.advertisement.update({
+            where: { id },
+            data: { views: newViews, ctr: newCtrStr }
+        });
+
+        return res.status(200).json({ success: true, views: newViews, ctr: newCtrStr });
+    } catch (error) {
+        console.error('Record ad impression error:', error);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const recordAdClick = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const ad = await prisma.advertisement.findUnique({ where: { id } });
+        if (!ad) return res.status(404).json({ success: false, message: 'Ad not found' });
+
+        const newViews = ad.views || 1;
+        const newClicks = (ad.clicks || 0) + 1;
+        const newCtrNum = ((newClicks / newViews) * 100).toFixed(2);
+        const newCtrStr = `${newCtrNum}%`;
+
+        await prisma.advertisement.update({
+            where: { id },
+            data: { clicks: newClicks, ctr: newCtrStr }
+        });
+
+        return res.status(200).json({ success: true, clicks: newClicks, ctr: newCtrStr });
+    } catch (error) {
+        console.error('Record ad click error:', error);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+};
+
+const getPublicAds = async (req, res) => {
+    try {
+        const rows = await prisma.advertisement.findMany({
+            where: { status: 'ACTIVE' },
+            include: { branch: true, owner: true },
+            orderBy: { createdAt: 'desc' }
+        });
+        return res.status(200).json({ success: true, data: rows.map(formatAd) });
+    } catch (error) {
+        console.error('Fetch public ads error:', error);
+        return res.status(500).json({ success: false, message: error.message });
     }
 };
 
 module.exports = {
     getAdvertisements, createAdvertisement, updateAdvertisement, updateAdStatus,
-    deleteAdvertisement, getCommissions, markCommissionPaid, getPayments, getAdAnalytics
+    deleteAdvertisement, getCommissions, markCommissionPaid, getPayments, getAdAnalytics,
+    recordAdImpression, recordAdClick, getPublicAds
 };

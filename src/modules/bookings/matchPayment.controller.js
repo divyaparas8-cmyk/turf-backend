@@ -150,7 +150,7 @@ class MatchPaymentController {
                         perPlayerAmount: pricing.perPlayerAmount,
                         opponentPaymentDeadline: deadline,
                         dareStrategy: paymentMode === 'DARE_TO_PLAY' ? 'SECURED_PREPAYMENT' : null,
-                        financialSnapshot: { ...(pricing.financialSnapshot || {}), durationHours },
+                        financialSnapshot: { ...(pricing.financialSnapshot || {}), durationHours, adId: req.body.adId || req.body.activeAdId || null },
                         commissionRateSnapshot: pricing.commissionRateSnapshot
                     }
                 });
@@ -263,7 +263,7 @@ class MatchPaymentController {
      */
     static async verifyPayment(req, res) {
         try {
-            const { matchId, holdId, upiTransactionId, paymentMethod = 'UPI', idempotencyKey } = req.body;
+            const { matchId, holdId, upiTransactionId, paymentMethod = 'UPI', idempotencyKey, adId } = req.body;
             if (!req.user) {
                 req.user = { id: 'usr_guest_anonymous', role: 'PLAYER' };
             }
@@ -311,10 +311,12 @@ class MatchPaymentController {
                     }
                 });
 
-                await SlotHoldService.convertHold(holdId);
+                if (holdId) {
+                    await tx.slotHold.deleteMany({ where: { OR: [{ id: holdId }, { matchId }] } }).catch(() => {});
+                }
 
                 // Fetch slot details to resolve all covered slots for multi-hour duration
-                const primarySlot = await tx.slot.findUnique({ where: { id: match.slotId }, include: { sport: true } });
+                const primarySlot = match.slotId ? await tx.slot.findUnique({ where: { id: match.slotId }, include: { sport: true } }) : null;
                 if (primarySlot) {
                     const startH = Number(primarySlot.startTime.split(':')[0]);
                     const finSnap = typeof match.financialSnapshot === 'string' ? JSON.parse(match.financialSnapshot) : (match.financialSnapshot || {});
@@ -360,6 +362,74 @@ class MatchPaymentController {
                     }
                 });
 
+                const finSnap = typeof match.financialSnapshot === 'string' ? (JSON.parse(match.financialSnapshot) || {}) : (match.financialSnapshot || {});
+                const targetAdId = adId || req.body.adId || req.body.activeAdId || finSnap.adId;
+                if (targetAdId) {
+                    try {
+                        const ad = await tx.advertisement.findUnique({ where: { id: targetAdId } }).catch(() => null);
+                        if (ad) {
+                            const commRate = Number(ad.commissionRate || 10);
+                            const commissionAmount = Math.round((paymentAmount * commRate) / 100);
+                            const ownerAmount = paymentAmount - commissionAmount;
+                            const invoiceNumber = `INV-AD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+                            await tx.adCommission.create({
+                                data: {
+                                    id: genId('adcomm'),
+                                    adId: ad.id,
+                                    branchId: ad.branchId || match.branchId,
+                                    bookingId: bookingCode,
+                                    bookingAmount: paymentAmount,
+                                    commissionRate: commRate,
+                                    commissionAmount,
+                                    ownerAmount,
+                                    status: 'PAID',
+                                    invoiceNumber
+                                }
+                            }).catch(err => console.error('AdComm create err:', err));
+
+                            await tx.adPayment.create({
+                                data: {
+                                    id: genId('adpay'),
+                                    adId: ad.id,
+                                    branchId: ad.branchId || match.branchId,
+                                    ownerId: ad.ownerId || req.user.id,
+                                    campaignName: ad.name,
+                                    invoiceNumber,
+                                    totalAmount: paymentAmount,
+                                    paymentMode: paymentMethod,
+                                    status: 'COMPLETED',
+                                    billingDate: new Date()
+                                }
+                            }).catch(err => console.error('AdPay create err:', err));
+
+                            const newBookings = (ad.bookings || 0) + 1;
+                            const newRevenue = Number(ad.revenue || 0) + paymentAmount;
+                            const newCommPaid = Number(ad.commissionPaid || 0) + commissionAmount;
+                            const budgetTotal = Number(ad.budgetTotal || 5000);
+                            const budgetSpent = Math.min(budgetTotal, Math.max(Number(ad.budgetSpent || 0), newCommPaid));
+                            const roiNum = budgetSpent > 0 ? Math.round(((newRevenue - budgetSpent) / budgetSpent) * 100) : 100;
+                            const cpaNum = newBookings > 0 ? Math.round(budgetSpent / newBookings) : 0;
+                            const ctrStr = ad.views > 0 ? `${(((ad.clicks || 0) / (ad.views || 1)) * 100).toFixed(2)}%` : '0%';
+
+                            await tx.advertisement.update({
+                                where: { id: ad.id },
+                                data: {
+                                    bookings: newBookings,
+                                    revenue: newRevenue,
+                                    commissionPaid: newCommPaid,
+                                    budgetSpent,
+                                    roi: `${roiNum}%`,
+                                    cpa: `₹${cpaNum}`,
+                                    ctr: ctrStr
+                                }
+                            }).catch(err => console.error('Ad update err:', err));
+                        }
+                    } catch (adErr) {
+                        console.error('Error logging ad booking metrics:', adErr);
+                    }
+                }
+
                 const needsOpponentPayment = match.paymentMode !== 'FULL_PAY' && Number(match.teamBShare) > 0;
                 let newMatchStatus = match.matchStatus;
                 let inviteToken = null;
@@ -381,7 +451,7 @@ class MatchPaymentController {
                 });
 
                 return { payment, newMatchStatus, inviteToken };
-            });
+            }, { maxWait: 10000, timeout: 20000 });
 
             let payoutDestination = null;
             try {
