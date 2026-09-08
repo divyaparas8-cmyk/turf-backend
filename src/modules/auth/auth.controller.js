@@ -15,6 +15,7 @@ const publicUser = (u) => ({
     name: u.name,
     email: u.email,
     role: u.role,
+    staffBranchId: u.staffBranchId || null,
     mobile: u.mobile || '',
     alternateMobile: u.alternateMobile || '',
     avatar: u.avatar || ''

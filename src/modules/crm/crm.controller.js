@@ -25,12 +25,16 @@ const resolveOwnerBranchIds = async (user) => {
         const allB = await prisma.branch.findMany({ select: { id: true } });
         return allB.map(b => b.id);
     }
+    if (user.role === 'STAFF' && user.staffBranchId) {
+        return [user.staffBranchId];
+    }
     const ownerProfile = await prisma.owner.findUnique({ where: { userId: user.id } }).catch(() => null);
     const branches = await prisma.branch.findMany({
         where: {
             OR: [
                 { ownerUserId: user.id },
-                { ownerId: ownerProfile ? ownerProfile.id : 'NO_MATCH' }
+                { ownerId: ownerProfile ? ownerProfile.id : 'NO_MATCH' },
+                ...(user.staffBranchId ? [{ id: user.staffBranchId }] : [])
             ]
         },
         select: { id: true }
@@ -50,35 +54,46 @@ const getLeads = async (req, res) => {
     }
     try {
         const { branchId, category, status } = req.query;
+        let ownerBranches = null;
+        if (!branchId && req.user.role !== 'SUPER_ADMIN' && req.user.role !== 'SUPERADMIN') {
+            ownerBranches = await resolveOwnerBranchIds(req.user);
+        }
+
         const where = {};
         if (branchId) where.branchId = branchId;
-        else if (req.user.role !== 'SUPER_ADMIN') where.branchId = { in: await resolveOwnerBranchIds(req.user) };
+        else if (ownerBranches && ownerBranches.length > 0) where.branchId = { in: ownerBranches };
         if (category && category !== 'ALL') where.category = category;
         if (status && status !== 'ALL') where.status = status;
 
-        // 1. Fetch explicit CRM leads
-        const explicitLeads = await prisma.crmLead.findMany({ where, orderBy: { createdAt: 'desc' } });
+        const bookingWhere = {};
+        if (branchId) bookingWhere.slot = { branchId };
+        else if (ownerBranches && ownerBranches.length > 0) bookingWhere.slot = { branchId: { in: ownerBranches } };
+
+        // Fetch all datasets in PARALLEL with take limits for instant response
+        const [explicitLeads, realBookings, corporateList, umpireList] = await Promise.all([
+            prisma.crmLead.findMany({ where, orderBy: { createdAt: 'desc' }, take: 100 }).catch(() => []),
+            prisma.booking.findMany({
+                where: bookingWhere,
+                include: { slot: { include: { branch: true } } },
+                orderBy: { createdAt: 'desc' },
+                take: 100
+            }).catch(() => []),
+            prisma.corporateBooking.findMany({
+                include: { preferredTurf: true },
+                orderBy: { createdAt: 'desc' },
+                take: 50
+            }).catch(() => []),
+            prisma.umpireProfile.findMany({ take: 50 }).catch(() => [])
+        ]);
+
         const leadsMap = new Map();
 
+        // 1. Process explicit CRM leads
         for (const l of explicitLeads) {
             leadsMap.set(l.phone || l.id, formatLead(l));
         }
 
-        // 2. Fetch real bookings to auto-populate customer/captain leads
-        const bookingWhere = {};
-        if (branchId) bookingWhere.slot = { branchId };
-        else if (req.user.role !== 'SUPER_ADMIN') {
-            const ownerBranches = await resolveOwnerBranchIds(req.user);
-            bookingWhere.slot = { branchId: { in: ownerBranches } };
-        }
-
-        const realBookings = await prisma.booking.findMany({
-            where: bookingWhere,
-            include: { slot: { include: { branch: true } } },
-            orderBy: { createdAt: 'desc' },
-            take: 100
-        });
-
+        // 2. Process real bookings
         for (const b of realBookings) {
             const phoneKey = b.mobileNumber || `b_${b.id}`;
             if (!leadsMap.has(phoneKey)) {
@@ -102,12 +117,7 @@ const getLeads = async (req, res) => {
             }
         }
 
-        // 3. Fetch corporate proposals
-        const corporateList = await prisma.corporateBooking.findMany({
-            include: { preferredTurf: true },
-            orderBy: { createdAt: 'desc' }
-        });
-
+        // 3. Process corporate proposals
         for (const c of corporateList) {
             const corpKey = c.phone || c.id;
             if (!leadsMap.has(corpKey)) {
@@ -131,33 +141,28 @@ const getLeads = async (req, res) => {
             }
         }
 
-        // 4. Fetch registered umpires safely
-        try {
-            const umpireList = await prisma.umpireProfile.findMany({});
-            for (const u of umpireList) {
-                const umpKey = u.id;
-                if (!leadsMap.has(umpKey)) {
-                    leadsMap.set(umpKey, {
-                        id: u.id,
-                        branchId: null,
-                        branchName: u.officiatingLocations ? u.officiatingLocations.replace(' (Indore)', '').replace(' (Pune)', '') : '',
-                        name: u.fullName || 'Verified Referee',
-                        phone: '9876543210',
-                        email: null,
-                        category: 'UMPIRE',
-                        teamName: `Certified Umpire (${u.certificationLevel || 'BCCI Level 1'})`,
-                        preferredSport: 'Cricket',
-                        preferredSlot: 'Match Officiating',
-                        status: 'Active',
-                        notes: `Matches: ${u.matchesOfficiated || 0} · Rating: ${u.rating || 5.0}⭐`,
-                        broadcastCount: 0,
-                        lastBroadcastAt: null,
-                        createdAt: u.createdAt
-                    });
-                }
+        // 4. Process registered umpires
+        for (const u of umpireList) {
+            const umpKey = u.id;
+            if (!leadsMap.has(umpKey)) {
+                leadsMap.set(umpKey, {
+                    id: u.id,
+                    branchId: null,
+                    branchName: u.officiatingLocations ? u.officiatingLocations.replace(' (Indore)', '').replace(' (Pune)', '') : '',
+                    name: u.fullName || 'Verified Referee',
+                    phone: '9876543210',
+                    email: null,
+                    category: 'UMPIRE',
+                    teamName: `Certified Umpire (${u.certificationLevel || 'BCCI Level 1'})`,
+                    preferredSport: 'Cricket',
+                    preferredSlot: 'Match Officiating',
+                    status: 'Active',
+                    notes: `Matches: ${u.matchesOfficiated || 0} · Rating: ${u.rating || 5.0}⭐`,
+                    broadcastCount: 0,
+                    lastBroadcastAt: null,
+                    createdAt: u.createdAt
+                });
             }
-        } catch (uErr) {
-            console.warn('Umpire CRM synthesis note:', uErr.message);
         }
 
         let allLeads = Array.from(leadsMap.values());

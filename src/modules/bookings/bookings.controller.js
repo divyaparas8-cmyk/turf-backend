@@ -11,6 +11,7 @@ const formatBooking = (b) => {
     const commRate = 10;
     const commissionAmount = Math.round((grossAmount * commRate) / 100);
     const ownerAmount = grossAmount - commissionAmount;
+    const paymentMethod = b.payments?.[0]?.paymentMethod || (b.notes && b.notes.toLowerCase().includes('razorpay') ? 'UPI' : (b.paymentMethod || 'CASH'));
 
     return {
         booking_id: b.id,
@@ -27,6 +28,8 @@ const formatBooking = (b) => {
         duration: b.duration,
         booking_status: b.status,
         status: b.status,
+        payment_method: paymentMethod,
+        paymentMethod: paymentMethod,
         booked_on: b.createdAt,
         branch_id: b.slot?.branchId || null,
         slot_date: b.slot?.slotDate || b.dutyDate,
@@ -68,17 +71,35 @@ const createBooking = async (req, res) => {
                 return res.status(409).json({ success: false, message: `This slot is no longer available (current status: ${slot.status}).` });
             }
         } else {
-            const resolved = await resolveOrCreateSlot({ branchId, sportId, courtName, slotDate, startTime, endTime });
+            let effectiveBranchId = branchId;
+            if (req.user && (req.user.role === 'STAFF' || req.user.role === 'staff')) {
+                const staffUser = await prisma.user.findUnique({ where: { id: req.user.id }, select: { staffBranchId: true } }).catch(() => null);
+                if (staffUser?.staffBranchId) {
+                    effectiveBranchId = staffUser.staffBranchId;
+                }
+            }
+            const resolved = await resolveOrCreateSlot({ branchId: effectiveBranchId, sportId, courtName, slotDate, startTime, endTime });
             if (!resolved.ok) return res.status(resolved.code).json({ success: false, message: resolved.message });
             slot = resolved.slot;
         }
 
-        const amount = slot.isPeakHour ? Number(slot.peakPrice) : Number(slot.regularPrice);
+        const requestedAmount = (req.body.amount !== undefined && !isNaN(Number(req.body.amount)) && Number(req.body.amount) > 0)
+            ? Number(req.body.amount)
+            : (slot.isPeakHour ? Number(slot.peakPrice) : Number(slot.regularPrice));
+        const amount = requestedAmount;
         const bookingUserId = req.user ? req.user.id : null;
 
+        let targetSportName = 'Cricket';
+        if (sportId) {
+            const sp = await prisma.sport.findUnique({ where: { id: sportId } }).catch(() => null);
+            if (sp) targetSportName = sp.name;
+        }
+
         const result = await prisma.$transaction(async (tx) => {
-            const bookedSlot = await tx.slot.update({ where: { id: slot.id, status: 'AVAILABLE' }, data: { status: 'BOOKED' } }).catch(() => null);
-            if (!bookedSlot) throw Object.assign(new Error('Slot was just booked by someone else.'), { code: 'RACE' });
+            await tx.slot.update({
+                where: { id: slot.id },
+                data: { status: 'BOOKED' }
+            }).catch(() => null);
 
             const booking = await tx.booking.create({
                 data: {
@@ -87,8 +108,12 @@ const createBooking = async (req, res) => {
                     userId: bookingUserId,
                     customerName: customerName.trim(),
                     mobileNumber: mobileNumber.trim(),
+                    sportName: targetSportName,
+                    courtName: courtName || slot.courtName || 'Court 1',
+                    timeSlot: startTime ? String(startTime).substring(0, 5) : '18:00',
+                    dutyDate: slotDate ? new Date(slotDate) : new Date(),
                     amount,
-                    duration: slot.duration,
+                    duration: slot.duration || 60,
                     notes: (notes || '').trim(),
                     status: 'COMPLETED'
                 }
@@ -108,7 +133,7 @@ const createBooking = async (req, res) => {
             });
 
             return booking;
-        });
+        }, { maxWait: 15000, timeout: 30000 });
 
         emitToBranch(slot.branchId, 'booking:new', { bookingId: result.id, bookingCode: result.bookingCode, amount });
         if (bookingUserId) emitToUser(bookingUserId, 'booking:new', { bookingId: result.id, bookingCode: result.bookingCode });
@@ -124,7 +149,7 @@ const createBooking = async (req, res) => {
             return res.status(409).json({ success: false, message: error.message });
         }
         console.error('Create booking transaction error:', error);
-        return res.status(500).json({ success: false, message: 'Internal Server Error placing booking.' });
+        return res.status(500).json({ success: false, message: error.message || 'Internal Server Error placing booking.' });
     }
 };
 
@@ -291,6 +316,7 @@ const resolveBranchFilterForUser = async (req, branchId) => {
 
     // Staff member is scoped to their assigned staff branch
     if (userRole === 'STAFF') {
+        if (req.user?.staffBranchId) return { branchId: req.user.staffBranchId };
         const staffUser = await prisma.user.findUnique({ where: { id: req.user.id }, select: { staffBranchId: true } });
         return staffUser?.staffBranchId ? { branchId: staffUser.staffBranchId } : {};
     }
@@ -359,7 +385,7 @@ const getBookingHistory = async (req, res) => {
     }
 
     try {
-        const { branchId } = req.query;
+        const { branchId, date, slotDate, limit } = req.query;
         let bookingWhere = {};
         let matchPayWhere = {};
 
@@ -382,19 +408,67 @@ const getBookingHistory = async (req, res) => {
             // STAFF, OWNER, SUPER_ADMIN - scope by branch
             const branchFilter = await resolveBranchFilterForUser(req, branchId);
             if (branchFilter.branchId) {
-                bookingWhere = { slot: { branchId: branchFilter.branchId } };
+                if (req.user.role === 'STAFF' || req.user.role === 'staff') {
+                    bookingWhere = {
+                        OR: [
+                            { slot: { branchId: branchFilter.branchId } },
+                            { userId: req.user.id }
+                        ]
+                    };
+                } else {
+                    bookingWhere = { slot: { branchId: branchFilter.branchId } };
+                }
                 matchPayWhere = { match: { branchId: branchFilter.branchId } };
             }
         }
 
+        // Fast Database-level Date Filter (Today / Selected Date)
+        const targetDateStr = (date || slotDate);
+        if (targetDateStr) {
+            const startOfDay = new Date(`${targetDateStr}T00:00:00.000Z`);
+            const endOfDay = new Date(`${targetDateStr}T23:59:59.999Z`);
+            const targetDateObj = new Date(targetDateStr);
+
+            const dateOrCondition = {
+                OR: [
+                    { slot: { slotDate: targetDateObj } },
+                    { dutyDate: targetDateObj },
+                    { createdAt: { gte: startOfDay, lte: endOfDay } }
+                ]
+            };
+
+            if (Object.keys(bookingWhere).length > 0) {
+                bookingWhere = { AND: [bookingWhere, dateOrCondition] };
+            } else {
+                bookingWhere = dateOrCondition;
+            }
+
+            const matchDateOrCondition = {
+                OR: [
+                    { createdAt: { gte: startOfDay, lte: endOfDay } },
+                    { match: { slot: { slotDate: targetDateObj } } }
+                ]
+            };
+
+            if (Object.keys(matchPayWhere).length > 0) {
+                matchPayWhere = { AND: [matchPayWhere, matchDateOrCondition] };
+            } else {
+                matchPayWhere = matchDateOrCondition;
+            }
+        }
+
+        const takeLimit = limit ? Number(limit) : (targetDateStr ? 100 : 200);
+
         const [bookings, matchPayments] = await Promise.all([
             prisma.booking.findMany({
                 where: bookingWhere,
-                include: { slot: { include: { sport: true, branch: true } } },
+                take: takeLimit,
+                include: { slot: { include: { sport: true, branch: true } }, payments: true },
                 orderBy: { createdAt: 'desc' }
             }),
             prisma.matchPayment.findMany({
                 where: matchPayWhere,
+                take: takeLimit,
                 include: { match: { include: { branch: true, sport: true, captainA: true, matchTeams: true } } },
                 orderBy: { createdAt: 'desc' }
             })
