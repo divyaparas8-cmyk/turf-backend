@@ -136,8 +136,12 @@ const createOwner = async (req, res) => {
         const turfBranchName = (businessName && businessName.trim()) ? businessName.trim() : `${fullName.trim()}'s Turf Arena`;
 
         const selectedPlanId = planId || 'plan_starter';
-        const activePlan = await prisma.subscriptionPlan.findUnique({ where: { id: selectedPlanId } });
-        const planPriceAmount = Number(activePlan?.monthlyPrice || (selectedPlanId === 'plan_starter' ? 800 : 3000));
+        let activePlan = await prisma.subscriptionPlan.findUnique({ where: { id: selectedPlanId } });
+        if (!activePlan) {
+            activePlan = await prisma.subscriptionPlan.findFirst({ where: { status: 'ACTIVE' } });
+        }
+        const resolvedPlanId = activePlan ? activePlan.id : null;
+        const planPriceAmount = Number(activePlan?.monthlyPrice || 800);
 
         const owner = await prisma.$transaction(async (tx) => {
             const createdOwner = await tx.owner.create({
@@ -158,7 +162,7 @@ const createOwner = async (req, res) => {
                     zipCode: zipCode ? zipCode.trim() : null,
                     fullAddress: fullAddress ? fullAddress.trim() : null,
                     profileImage: profileImage || null,
-                    subscriptionPlan: { connect: { id: selectedPlanId } },
+                    ...(resolvedPlanId ? { subscriptionPlan: { connect: { id: resolvedPlanId } } } : {}),
                     createdBy: req.user?.id || 'SYSTEM',
                     updatedBy: req.user?.id || 'SYSTEM',
                     user: {
@@ -184,7 +188,7 @@ const createOwner = async (req, res) => {
                     branchCode,
                     ownerId: createdOwner.id,
                     ownerUserId: createdOwner.userId,
-                    subscriptionPlanId: selectedPlanId,
+                    subscriptionPlanId: resolvedPlanId,
                     subscriptionPriceSnapshot: planPriceAmount,
                     planPrice: planPriceAmount,
                     city: city ? city.trim() : null,
@@ -200,7 +204,7 @@ const createOwner = async (req, res) => {
                 data: {
                     id: genId('sub'),
                     ownerId: createdOwner.id,
-                    planId: selectedPlanId,
+                    planId: resolvedPlanId,
                     planName: activePlan?.planName || 'Starter Plan',
                     amount: planPriceAmount,
                     billingCycle: 'MONTHLY',
@@ -211,6 +215,9 @@ const createOwner = async (req, res) => {
             });
 
             return createdOwner;
+        }, {
+            maxWait: 15000,
+            timeout: 30000
         });
 
         sendTurfAdminCredentialsEmail({
@@ -400,6 +407,9 @@ const updateOwner = async (req, res) => {
             await tx.user.update({ where: { id: current.userId }, data: userData });
 
             return ownerUpdated;
+        }, {
+            maxWait: 15000,
+            timeout: 30000
         });
 
         return res.status(200).json({ success: true, message: 'Owner updated successfully', data: formatOwner(updated) });

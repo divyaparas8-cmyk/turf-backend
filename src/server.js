@@ -40,10 +40,14 @@ async function startServer() {
 
         server.on('error', (err) => {
             if (err.code === 'EADDRINUSE') {
-                console.log(`\n===============================================================`);
-                console.log(`ℹ️  Backend server is ALREADY RUNNING and active on port ${PORT}.`);
-                console.log(`===============================================================\n`);
-                process.exit(0);
+                console.log(`Port ${PORT} is busy, retrying in 1s...`);
+                setTimeout(() => {
+                    server.close();
+                    server.listen(PORT);
+                }, 1000);
+            } else {
+                console.error('Server error:', err);
+                process.exit(1);
             }
         });
 

@@ -28,15 +28,23 @@ const formatRefund = (r) => ({
 const resolveOwnBranchId = async (userId) => {
     const user = await prisma.user.findUnique({ where: { id: userId }, select: { staffBranchId: true } });
     if (user?.staffBranchId) return user.staffBranchId;
-    const ownerBranch = await prisma.branch.findFirst({ where: { ownerUserId: userId } });
+    const ownerBranch = await prisma.branch.findFirst({
+        where: {
+            OR: [
+                { ownerUserId: userId },
+                { ownerId: userId },
+                { owner: { userId } }
+            ]
+        }
+    });
     return ownerBranch?.id || null;
 };
 
-/** Scope: Staff/Owner see only their own branch's refund requests; Super Admin sees all. */
+/** Scope: Staff/Owner see only their own branch's refund requests; Super Admin / Admin sees all. */
 const resolveBranchScope = async (req) => {
-    if (req.user.role === 'SUPER_ADMIN') return {};
+    if (!req.user || req.user.role === 'SUPER_ADMIN' || req.user.role === 'SUPERADMIN' || req.user.role === 'ADMIN') return {};
     const branchId = await resolveOwnBranchId(req.user.id);
-    return branchId ? { branchId } : { branchId: '__none__' };
+    return branchId ? { branchId } : {};
 };
 
 const getRefundRequests = async (req, res) => {
@@ -128,4 +136,50 @@ const updateRefundStatus = async (req, res) => {
     }
 };
 
-module.exports = { getRefundRequests, createRefundRequest, updateRefundStatus };
+const updateRefundRequest = async (req, res) => {
+    const { id } = req.params;
+    const { customerName, customerPhone, bookingId, amount, reason } = req.body;
+
+    try {
+        const existing = await prisma.refundRequest.findUnique({ where: { id } });
+        if (!existing) {
+            return res.status(404).json({ success: false, message: 'Refund request not found.' });
+        }
+
+        const updated = await prisma.refundRequest.update({
+            where: { id },
+            data: {
+                customerName: customerName ? customerName.trim() : undefined,
+                customerPhone: customerPhone !== undefined ? customerPhone : undefined,
+                bookingId: bookingId ? Number(bookingId) : undefined,
+                amount: amount !== undefined ? Number(amount) : undefined,
+                reason: reason ? reason.trim() : undefined
+            }
+        });
+
+        emitToBranch(existing.branchId, 'refund:updated', { id, action: 'edit' });
+        return res.status(200).json({ success: true, message: 'Refund request updated successfully.', data: formatRefund(updated) });
+    } catch (error) {
+        console.error('Update refund request error:', error);
+        return res.status(500).json({ success: false, message: 'Internal Server Error updating refund request: ' + error.message });
+    }
+};
+
+const deleteRefundRequest = async (req, res) => {
+    const { id } = req.params;
+    try {
+        const existing = await prisma.refundRequest.findUnique({ where: { id } });
+        if (!existing) {
+            return res.status(404).json({ success: false, message: 'Refund request not found.' });
+        }
+
+        await prisma.refundRequest.delete({ where: { id } });
+        emitToBranch(existing.branchId, 'refund:updated', { id, action: 'delete' });
+        return res.status(200).json({ success: true, message: 'Refund request deleted successfully.' });
+    } catch (error) {
+        console.error('Delete refund request error:', error);
+        return res.status(500).json({ success: false, message: 'Internal Server Error deleting refund request: ' + error.message });
+    }
+};
+
+module.exports = { getRefundRequests, createRefundRequest, updateRefundStatus, updateRefundRequest, deleteRefundRequest };
