@@ -27,7 +27,7 @@ const storage = multer.diskStorage({
 });
 
 const upload = multer({ storage });
-const requireOwnerOrAdmin = [verifyToken, authorizeRoles(['OWNER', 'SUPER_ADMIN'])];
+const requireOwnerOrAdmin = [verifyToken, authorizeRoles(['OWNER', 'SUPER_ADMIN', 'ADMIN', 'STAFF'])];
 
 // Public browsing (offers are shown to customers) -- optionalToken lets owner-scoped filtering apply when logged in
 router.get('/', optionalToken, getDiscountOffers);
